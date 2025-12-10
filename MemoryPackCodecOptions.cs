@@ -1,27 +1,27 @@
-﻿using MemoryPack;
+using MemoryPack;
+using System;
+using System.Collections.Generic;
 
-namespace Orleans.Serialization.MemoryPack
+namespace Orleans.Serialization;
+
+/// <summary>
+/// Options for <see cref="MemoryPackCodec"/>.
+/// </summary>
+public class MemoryPackCodecOptions
 {
+    //
     /// <summary>
-    /// Options for configuring MemoryPack serialization in Orleans.
+    /// Gets or sets the <see cref="MemoryPackSerializerOptions"/>.
     /// </summary>
-    public sealed class MemoryPackCodecOptions
-    {
-        //
-        // Summary:
-        //     Gets or sets the MemoryPackSerializerOptions
-        public MemoryPackSerializerOptions SerializerOptions { get; set; } = MemoryPackSerializerOptions.Default;
+    public MemoryPackSerializerOptions SerializerOptions { get; set; } = MemoryPackSerializerOptions.Default;
 
-        //
-        // Summary:
-        //     Gets or sets a delegate used to determine if a type is supported by the MemoryPack
-        //     serializer for serialization and deserialization.
-        public Func<Type, bool?> IsSerializableType { get; set; }
+    /// <summary>
+    /// Gets or sets a delegate used to determine if a type is supported by the MemoryPack serializer for serialization and deserialization.
+    /// </summary>
+    public Func<Type, bool?> IsSerializableType { get; set; }
 
-        //
-        // Summary:
-        //     Gets or sets a delegate used to determine if a type is supported by the MemoryPack
-        //     serializer for copying.
-        public Func<Type, bool?> IsCopyableType { get; set; }
-    }
+    /// <summary>
+    /// Gets or sets a delegate used to determine if a type is supported by the MemoryPack serializer for copying.
+    /// </summary>
+    public Func<Type, bool?> IsCopyableType { get; set; }
 }

@@ -1,4 +1,5 @@
-﻿using MemoryPack;
+using System;
+using MemoryPack;
 using Microsoft.Extensions.Options;
 using Orleans.Serialization.Buffers;
 using Orleans.Serialization.Buffers.Adaptors;
@@ -9,198 +10,232 @@ using Orleans.Serialization.WireProtocol;
 using System.Collections.Concurrent;
 using System.Reflection;
 
-namespace Orleans.Serialization.MemoryPack
+namespace Orleans.Serialization;
+
+/// <summary>
+/// A serialization codec which uses <see cref="MemoryPackSerializer"/>.
+/// </summary>
+/// <remarks>
+/// MemoryPack codec performs slightly worse than default Orleans serializer, if performance is critical for your application, consider using default serialization.
+/// </remarks>
+[Alias(WellKnownAlias)]
+public class MemoryPackCodec : IGeneralizedCodec, IGeneralizedCopier, ITypeFilter
 {
+    private static readonly ConcurrentDictionary<Type, bool> SupportedTypes = new();
+    private static readonly Type SelfType = typeof(MemoryPackCodec);
+
+    private readonly ICodecSelector[] _serializableTypeSelectors;
+    private readonly ICopierSelector[] _copyableTypeSelectors;
+    private readonly MemoryPackCodecOptions _options;
+
     /// <summary>
-    /// A generic Orleans field codec which uses MemoryPack for serialization.
+    /// The well-known type alias for this codec.
     /// </summary>
-    /// <typeparam name="T">The type being serialized.</typeparam>
-    [Alias(WellKnownAlias)]
-    internal sealed class MemoryPackCodec : IGeneralizedCodec, IGeneralizedCopier, ITypeFilter
+    public const string WellKnownAlias = "memorypack";
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MemoryPackCodec"/> class.
+    /// </summary>
+    /// /// <param name="serializableTypeSelectors">Filters used to indicate which types should be serialized by this codec.</param>
+    /// <param name="copyableTypeSelectors">Filters used to indicate which types should be copied by this codec.</param>
+    /// <param name="options">The MemoryPack codec options.</param>
+    public MemoryPackCodec(
+        IEnumerable<ICodecSelector> serializableTypeSelectors,
+        IEnumerable<ICopierSelector> copyableTypeSelectors,
+        IOptions<MemoryPackCodecOptions> options)
     {
-        private static readonly ConcurrentDictionary<Type, bool> SupportedTypes = new();
-        private static readonly Type SelfType = typeof(MemoryPackCodec);
+        _serializableTypeSelectors = serializableTypeSelectors.Where(t => string.Equals(t.CodecName, WellKnownAlias, StringComparison.Ordinal)).ToArray();
+        _copyableTypeSelectors = copyableTypeSelectors.Where(t => string.Equals(t.CopierName, WellKnownAlias, StringComparison.Ordinal)).ToArray();
+        _options = options.Value;
+    }
 
-        /// <summary>
-        /// The well-known type alias for this codec.
-        /// </summary>
-        public const string WellKnownAlias = "memorypack";
-
-        private readonly MemoryPackCodecOptions _options;
-
-        public MemoryPackCodec(IOptions<MemoryPackCodecOptions> options)
+    /// <inheritdoc/>
+    void IFieldCodec.WriteField<TBufferWriter>(ref Writer<TBufferWriter> writer, uint fieldIdDelta, Type expectedType, object value)
+    {
+        if (ReferenceCodec.TryWriteReferenceField(ref writer, fieldIdDelta, expectedType, value))
         {
-            _options = options.Value;
+            return;
         }
 
-        void IFieldCodec.WriteField<TBufferWriter>(ref Writer<TBufferWriter> writer, uint fieldIdDelta, Type expectedType, object value)
+        // The schema type when serializing the field is the type of the codec.
+        writer.WriteFieldHeader(fieldIdDelta, expectedType, SelfType, WireType.TagDelimited);
+
+        // Write the type name
+        ReferenceCodec.MarkValueField(writer.Session);
+        writer.WriteFieldHeaderExpected(0, WireType.LengthPrefixed);
+        writer.Session.TypeCodec.WriteLengthPrefixed(ref writer, value.GetType());
+
+        var bufferWriter = new BufferWriterBox<PooledBuffer>(new());
+        try
         {
-            if (ReferenceCodec.TryWriteReferenceField(ref writer, fieldIdDelta, expectedType, value))
-            {
-                return;
-            }
+            MemoryPackSerializer.Serialize(value.GetType(), bufferWriter, value);
 
-            // The schema type when serializing the field is the type of the codec.
-            writer.WriteFieldHeader(fieldIdDelta, expectedType, SelfType, WireType.TagDelimited);
-
-            // Write the type name
             ReferenceCodec.MarkValueField(writer.Session);
-            writer.WriteFieldHeaderExpected(0, WireType.LengthPrefixed);
-            writer.Session.TypeCodec.WriteLengthPrefixed(ref writer, value.GetType());
-
-            var bufferWriter = new BufferWriterBox<PooledBuffer>(new());
-            try
-            {
-
-                MemoryPackSerializer.Serialize(value.GetType(), bufferWriter, value);
-
-                ReferenceCodec.MarkValueField(writer.Session);
-                writer.WriteFieldHeaderExpected(1, WireType.LengthPrefixed);
-                writer.WriteVarUInt32((uint)bufferWriter.Value.Length);
-                bufferWriter.Value.CopyTo(ref writer);
-            }
-            finally
-            {
-                bufferWriter.Value.Dispose();
-            }
-
-            writer.WriteEndObject();
+            writer.WriteFieldHeaderExpected(1, WireType.LengthPrefixed);
+            writer.WriteVarUInt32((uint)bufferWriter.Value.Length);
+            bufferWriter.Value.CopyTo(ref writer);
+        }
+        finally
+        {
+            bufferWriter.Value.Dispose();
         }
 
-        object IFieldCodec.ReadValue<TInput>(ref Reader<TInput> reader, Field field)
+        writer.WriteEndObject();
+    }
+
+    /// <inheritdoc/>
+    object IFieldCodec.ReadValue<TInput>(ref Reader<TInput> reader, Field field)
+    {
+        if (field.IsReference)
         {
-            if (field.IsReference)
+            return ReferenceCodec.ReadReference(ref reader, field.FieldType);
+        }
+
+        field.EnsureWireTypeTagDelimited();
+
+        var placeholderReferenceId = ReferenceCodec.CreateRecordPlaceholder(reader.Session);
+        object result = null;
+        Type type = null;
+        uint fieldId = 0;
+        while (true)
+        {
+            var header = reader.ReadFieldHeader();
+            if (header.IsEndBaseOrEndObject)
             {
-                return ReferenceCodec.ReadReference(ref reader, field.FieldType);
+                break;
             }
 
-            field.EnsureWireTypeTagDelimited();
-
-            var placeholderReferenceId = ReferenceCodec.CreateRecordPlaceholder(reader.Session);
-            object result = null;
-            Type type = null;
-            uint fieldId = 0;
-            while (true)
+            fieldId += header.FieldIdDelta;
+            switch (fieldId)
             {
-                var header = reader.ReadFieldHeader();
-                if (header.IsEndBaseOrEndObject)
-                {
+                case 0:
+                    ReferenceCodec.MarkValueField(reader.Session);
+                    type = reader.Session.TypeCodec.ReadLengthPrefixed(ref reader);
                     break;
-                }
+                case 1:
+                    if (type is null)
+                    {
+                        ThrowTypeFieldMissing();
+                    }
 
-                fieldId += header.FieldIdDelta;
-                switch (fieldId)
-                {
-                    case 0:
-                        ReferenceCodec.MarkValueField(reader.Session);
-                        type = reader.Session.TypeCodec.ReadLengthPrefixed(ref reader);
-                        break;
-                    case 1:
-                        if (type is null)
-                        {
-                            ThrowTypeFieldMissing();
-                        }
+                    ReferenceCodec.MarkValueField(reader.Session);
+                    var length = reader.ReadVarUInt32();
 
-                        ReferenceCodec.MarkValueField(reader.Session);
-                        var length = reader.ReadVarUInt32();
+                    var bufferWriter = new BufferWriterBox<PooledBuffer>(new());
+                    try
+                    {
+                        reader.ReadBytes(ref bufferWriter, (int)length);
+                        result = MemoryPackSerializer.Deserialize(type, bufferWriter.Value.AsReadOnlySequence());
+                    }
+                    finally
+                    {
+                        bufferWriter.Value.Dispose();
+                    }
 
-                        var bufferWriter = new BufferWriterBox<PooledBuffer>(new());
-                        try
-                        {
-                            reader.ReadBytes(ref bufferWriter, (int)length);
-                            result = MemoryPackSerializer.Deserialize(type, bufferWriter.Value.AsReadOnlySequence());
-                        }
-                        finally
-                        {
-                            bufferWriter.Value.Dispose();
-                        }
-
-                        break;
-                    default:
-                        reader.ConsumeUnknownField(header);
-                        break;
-                }
+                    break;
+                default:
+                    reader.ConsumeUnknownField(header);
+                    break;
             }
-
-            ReferenceCodec.RecordObject(reader.Session, result, placeholderReferenceId);
-            return result;
         }
 
-        bool IGeneralizedCodec.IsSupportedType(Type type)
+        ReferenceCodec.RecordObject(reader.Session, result, placeholderReferenceId);
+        return result;
+    }
+
+    /// <inheritdoc/>
+    bool IGeneralizedCodec.IsSupportedType(Type type)
+    {
+        if (type == SelfType)
         {
-            if (type == SelfType)
+            return true;
+        }
+
+        if (CommonCodecTypeFilter.IsAbstractOrFrameworkType(type))
+        {
+            return false;
+        }
+
+        foreach (var selector in _serializableTypeSelectors)
+        {
+            if (selector.IsSupportedType(type))
             {
                 return true;
             }
-
-            if (CommonCodecTypeFilter.IsAbstractOrFrameworkType(type))
-            {
-                return false;
-            }
-
-            if (_options.IsSerializableType?.Invoke(type) is bool value)
-            {
-                return value;
-            }
-
-            return IsMemoryPackContract(type);
         }
 
-        object IDeepCopier.DeepCopy(object input, CopyContext context)
+        if (_options.IsSerializableType?.Invoke(type) is bool value)
         {
-            if (context.TryGetCopy(input, out object result))
-            {
-                return result;
-            }
+            return value;
+        }
 
-            var bufferWriter = new BufferWriterBox<PooledBuffer>(new());
-            try
-            {
-                MemoryPackSerializer.Serialize(input.GetType(), bufferWriter, input, _options.SerializerOptions);
+        return IsMemoryPackContract(type);
+    }
 
-                var sequence = bufferWriter.Value.AsReadOnlySequence();
-                result = MemoryPackSerializer.Deserialize(input.GetType(), sequence, _options.SerializerOptions);
-            }
-            finally
-            {
-                bufferWriter.Value.Dispose();
-            }
-
-            context.RecordCopy(input, result);
+    /// <inheritdoc/>
+    object IDeepCopier.DeepCopy(object input, CopyContext context)
+    {
+        if (context.TryGetCopy(input, out object result))
+        {
             return result;
         }
 
-        bool IGeneralizedCopier.IsSupportedType(Type type)
+        var bufferWriter = new BufferWriterBox<PooledBuffer>(new());
+        try
         {
-            if (CommonCodecTypeFilter.IsAbstractOrFrameworkType(type))
-            {
-                return false;
-            }
+            MemoryPackSerializer.Serialize(input.GetType(), bufferWriter, input, _options.SerializerOptions);
 
-            if (_options.IsCopyableType?.Invoke(type) is bool value)
-            {
-                return value;
-            }
-
-            return IsMemoryPackContract(type);
+            var sequence = bufferWriter.Value.AsReadOnlySequence();
+            result = MemoryPackSerializer.Deserialize(input.GetType(), sequence, _options.SerializerOptions);
+        }
+        finally
+        {
+            bufferWriter.Value.Dispose();
         }
 
-        /// <inheritdoc/>
-        bool? ITypeFilter.IsTypeAllowed(Type type) => (((IGeneralizedCopier)this).IsSupportedType(type) || ((IGeneralizedCodec)this).IsSupportedType(type)) ? true : null;
+        context.RecordCopy(input, result);
+        return result;
+    }
 
-        private static bool IsMemoryPackContract(Type type)
+    /// <inheritdoc/>
+    bool IGeneralizedCopier.IsSupportedType(Type type)
+    {
+        if (CommonCodecTypeFilter.IsAbstractOrFrameworkType(type))
         {
-            if (SupportedTypes.TryGetValue(type, out bool isMemoryPackContract))
+            return false;
+        }
+
+        foreach (var selector in _copyableTypeSelectors)
+        {
+            if (selector.IsSupportedType(type))
             {
-                return isMemoryPackContract;
+                return true;
             }
+        }
 
-            isMemoryPackContract = type.GetCustomAttribute<MemoryPackableAttribute>() is not null;
+        if (_options.IsCopyableType?.Invoke(type) is bool value)
+        {
+            return value;
+        }
 
-            SupportedTypes.TryAdd(type, isMemoryPackContract);
+        return IsMemoryPackContract(type);
+    }
+
+    /// <inheritdoc/>
+    bool? ITypeFilter.IsTypeAllowed(Type type) => (((IGeneralizedCopier)this).IsSupportedType(type) || ((IGeneralizedCodec)this).IsSupportedType(type)) ? true : null;
+
+    private static bool IsMemoryPackContract(Type type)
+    {
+        if (SupportedTypes.TryGetValue(type, out bool isMemoryPackContract))
+        {
             return isMemoryPackContract;
         }
 
-        private static void ThrowTypeFieldMissing() => throw new RequiredFieldMissingException("Serialized value is missing its type field.");
+        isMemoryPackContract = type.GetCustomAttribute<MemoryPackableAttribute>() is not null;
+
+        SupportedTypes.TryAdd(type, isMemoryPackContract);
+        return isMemoryPackContract;
     }
+
+    private static void ThrowTypeFieldMissing() => throw new RequiredFieldMissingException("Serialized value is missing its type field.");
 }
