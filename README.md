@@ -3,13 +3,6 @@
 ## Introduction
 Microsoft Orleans Serialization for MemoryPack provides MemoryPack serialization support for Microsoft Orleans using the MemoryPack format. This high-performance binary serialization format is ideal for scenarios requiring efficient serialization and deserialization.
 
-## Getting Started
-To use this package, install it via NuGet:
-
-```shell
-dotnet add package Microsoft.Orleans.Serialization.MemoryPack
-```
-
 ## Example - Configuring MemoryPack Serialization
 ```csharp
 using Microsoft.Extensions.DependencyInjection;
@@ -72,16 +65,3 @@ public class MyGrain : Grain, IMyGrain
     }
 }
 ```
-
-## Documentation
-For more comprehensive documentation, please refer to:
-- [Microsoft Orleans Documentation](https://learn.microsoft.com/dotnet/orleans/)
-- [Orleans Serialization](https://learn.microsoft.com/en-us/dotnet/orleans/host/configuration-guide/serialization)
-- [MemoryPack for C#](https://github.com/Cysharp/MemoryPack)
-
-## Feedback & Contributing
-- If you have any issues or would like to provide feedback, please [open an issue on GitHub](https://github.com/dotnet/orleans/issues)
-- Join our community on [Discord](https://aka.ms/orleans-discord)
-- Follow the [@msftorleans](https://twitter.com/msftorleans) Twitter account for Orleans announcements
-- Contributions are welcome! Please review our [contribution guidelines](https://github.com/dotnet/orleans/blob/main/CONTRIBUTING.md)
-- This project is licensed under the [MIT license](https://github.com/dotnet/orleans/blob/main/LICENSE)
